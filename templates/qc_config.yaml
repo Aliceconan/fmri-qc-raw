@@ -1,0 +1,151 @@
+# qc-raw 配置模板
+#
+# 用法：
+#   cp qc_config.yaml <project>/code/qc_config.yaml   # 然后按项目改
+#   python3 qc_raw.py --bids <bids> --config <project>/code/qc_config.yaml
+#
+# 所有字段都可省略，省略即用脚本内置默认值（面向 3T 3mm EPI）。
+# 顶层可以是 qc_raw: 子节（便于和 project.yaml 合并），也可以直接平铺。
+
+qc_raw:
+
+  # ============ 逐 TR 阈值 ============
+  # 单帧 Power FD 超过多少算「坏帧」(mm)。
+  # 常见取值：任务态 0.5，静息态功能连接 0.2~0.3（更严）
+  fd_thresh: 0.5
+  # 单帧 outlier 体素比例阈值，afni_proc.py 默认 0.05
+  outlier_thresh: 0.05
+
+  # ============ run 级判定 ============
+  # 坏帧占比 (%)：越线报 warn / fail。FD 和 outlier 共用这两个门限
+  pct_bad_warn: 10.0
+  pct_bad_fail: 25.0
+
+  # 全 run 平均 FD (mm)
+  fd_mean_warn: 0.20
+  fd_mean_fail: 0.50
+
+  # run 内位移范围（maxdisp_range），单位 = 面内体素大小的倍数。
+  # 用倍数而不是绝对 mm，这样 3mm 和 0.8mm 的数据共用一套配置
+  maxdisp_warn_vox: 1.0
+  maxdisp_fail_vox: 2.0
+
+  # tSNR 中位数（脑内，3dTstat -cvarinv）。
+  #
+  # ⚠ 文献里没有可引的 tSNR 绝对门限（查证见 references/metrics.md §4.1）。
+  #   Triantafyllou 2005 给的是物理关系（tSNR ∝ 体素体积，直到撞生理噪声天花板），
+  #   MRIQC 的 QC 规程明确说门限取决于项目、做法是相对本队列找离群。
+  #   所以下面这两个绝对值只当「明显坏掉」的兜底，**必须按自己的协议重标定**。
+  #
+  # 标定方法：跑一批你认可没问题的数据，warn 设在实测中位数的 ~2/3，fail 设 ~1/3。
+  # 已实测标定的协议：
+  #   7T 1.2mm iso GE-EPI TR=2 124层 32ch  → 实测 27.4-33.7(中位 29.9) → 20 / 12
+  #   3T 3.0mm EPI（默认值，未严格标定）    → 40 / 20
+  # 设成 null 可关掉绝对判定，只靠下面的相对判定。
+  tsnr_warn: 40.0
+  tsnr_fail: 20.0
+
+  # tSNR 相对判定：占同协议队列（同 task + 同矩阵 + 同体素）中位数的百分比。
+  # 这是 MRIQC 推荐的做法，不依赖任何绝对标准，换场强换序列都不用改 ——
+  # 是更可靠的那一道。组内 run 数少于 tsnr_rel_min_n 时跳过（没有可比基线）。
+  tsnr_rel_warn: 70.0
+  tsnr_rel_fail: 50.0
+  tsnr_rel_min_n: 3
+
+  # 全脑均值的线性漂移，占基线的百分比
+  drift_warn_pct: 5.0
+
+  # run 间位移 (mm)：各 run 中位头位之差。
+  # ❌ 无文献标准。fail=6 的依据是实测：7T 1.2mm 数据上某 run 偏离基准 9.05mm，
+  #    该被试配准效果明显变差。位移大会改变磁化率畸变、让 fieldmap 失效、
+  #    使刚体配准不收敛 —— 不是"配准能消掉"那么简单。
+  betrun_warn: 3.0
+  betrun_fail: 6.0
+
+  # FOV 覆盖：run 间位移的一种具体后果，独立于位移量本身。
+  # 阈值按实测标定（覆盖完好的 7T 数据：贴边 ≤0.0003，组内覆盖差异 ≤2.3%）
+  brain_edge_warn: 0.005     # 脑体素贴在 FOV 六个面上的最大占比
+  brain_edge_fail: 0.02
+  coverage_loss_warn: 5.0    # % 相对组内覆盖最好的 run
+  coverage_loss_fail: 15.0
+
+  # 预期已剔除的 dummy / 非稳态帧数。
+  # 若采集时保留了 dummy 且不打算在这里报警，设成实际保留数。
+  # 设 0 时只要检出非稳态帧就 warn —— 这通常是你想要的
+  nonsteady_expected: 0
+
+  # ============ 完整性 ============
+  # 与期望 volume 数允许的偏差（帧）。仅在下面显式配置了 expected_volumes 时生效
+  volume_tolerance: 0
+
+  # 没有显式配置 expected_volumes 时，用「同 task 最长 run」当参照：
+  #   n_volumes / 最长run < truncated_fail_ratio  → fail（疑似中断）
+  #   n_volumes / 最长run < truncated_warn_ratio  → warn
+  # 变长范式（自定步调、被试按键结束）把 warn_ratio 调低甚至设 0 关掉
+  truncated_fail_ratio: 0.60
+  truncated_warn_ratio: 0.95
+
+  # 每个 task 期望的 volume 数。配了就走严格比对，不配则走上面的比例判定。
+  # 两种写法：
+  #   rest: 240                        ← 该 task 所有 run 都是 240
+  #   taskA: {"01": 464, "02": 470}     ← 逐 run 指定（变长范式必须这么写）
+  # 直接从扫描协议表抄进来即可。
+  expected_volumes: {}
+  #   taskA:
+  #     "01": 464
+  #     "02": 470
+  #     "03": 419
+  #   rest: 240
+
+  # 每个 task 期望的 run 数。留空 {} 则用被试间众数推断
+  expected_runs: {}
+  #   taskA: 7
+  #   rest: 1
+
+  require_anat: true
+  require_fmap: false
+  # 协议里应该有几个 fmap 文件（例如每个 run 配一个 reverse-PE 就填 run 数）。
+  # null = 不检查。少了直接判 fail —— fmap 缺失事后补不回来，影响 blip 矫正分组
+  expected_fmap: null
+
+  # ============ 一致性 ============
+  # 这些字段跨 run / 跨被试必须一致，与多数派不同即告警。
+  # 可选字段：tr n_slices vox_str dim_str te flip_angle multiband readout pe_dir
+  #
+  # ⚠ 默认**不含 pe_dir**。不同 session 用相反的相位编码方向是允许的
+  #   （只要 func 和 fmap 在同一 session 内相反即可），
+  #   放进来会把正常的 session 差异误报成协议不一致。
+  #   确实要求全队列同方向时才加 pe_dir。
+  consistency_fields:
+    - tr
+    - n_slices
+    - vox_str
+    - dim_str
+    - te
+    - flip_angle
+
+  # 查「同 session 内至少有一个 fmap 与 func 相位编码方向严格相反」。
+  # 这是 blip / topup 矫正的硬性前提，不满足直接 fail。
+  # 同时会查 session 内 func 各 run 方向是否统一。
+  check_pe_opposite: true
+
+  # func base 卷与配对 fmap 的头位差 —— blip / topup 矫正的前提。
+  # 配对优先级：IntendedFor → run 实体 → 采集时间最近。
+  # ⚠ 只统计不受畸变污染的分量（垂直 PE 的平移 + 绕 PE 轴的旋转）；
+  #   PE 轴平移单独报出，不参与判定（它混了畸变差异）。详见 metrics.md §2.7
+  # ❌ 阈值无文献依据，单位是面内体素倍数
+  check_fmap_alignment: true
+  fmap_disp_warn_vox: 1.0
+  fmap_disp_fail_vox: 2.0
+
+  # 整场 B0 漂移（PE 轴）的告警线 mm。超过说明远端 run 用同一个 fmap
+  # 做 blip 可能对不齐。7T 两小时扫描实测约 4mm。详见 metrics.md §2.8
+  b0_drift_warn: 2.0
+
+  # ============ 运行控制 ============
+  # tSNR 是唯一需要写中间 volreg 文件的步骤。7T 大数据可关
+  compute_tsnr: true
+
+  # global  = 同几何组所有 run 配到同一基准卷（默认，才能算 run 间头动）
+  # per-run = 每个 run 配到自己的 min-outlier 卷（run 间头动不可用）
+  motion_base: global
