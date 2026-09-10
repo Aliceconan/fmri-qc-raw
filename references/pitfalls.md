@@ -1,4 +1,4 @@
-# qc-raw 已知陷阱
+# fmri-qc-raw 已知陷阱
 
 每条都是实际踩过或必然会踩的。按「会不会让你得出错误结论」排序。
 
@@ -291,16 +291,16 @@ FramewiseDisplacement(in_file='mot.1D', parameter_source='AFNI').run()
 
 ## D. 与 bids-convert 的边界
 
-### 16. qc-raw 不吃平铺 DICOM
+### 16. qc_raw.py 不吃平铺 DICOM
 
 必须先转 BIDS。bids-convert 的 `[7a] cleanup_aborted.py` 已经处理 1-vol 的
-aborted run；qc-raw 抓的是它漏掉的「跑了一半才停」（例如 470 期望里只有
+aborted run；qc_raw.py 抓的是它漏掉的「跑了一半才停」（例如 470 期望里只有
 104 vol）以及所有质量指标。
 
 ### 17. 重复扫描的 run 编号要在转换阶段定死
 
 实测数据里 DICOM 序列名 `run2` 实际是 run1（扫描时来不及改名），
-`run2_2` 才是 run2。这种事 qc-raw 看不出来，只能在 bids-convert 的
+`run2_2` 才是 run2。这种事 qc_raw.py 看不出来，只能在 bids-convert 的
 `[3] 交互确认` 阶段问人，并写进 `decision_log.md`。
 
 保留中断 run 时建议用 `acq-aborted` 标记而不是往后顺延 run 号，

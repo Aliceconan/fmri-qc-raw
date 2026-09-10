@@ -1,13 +1,13 @@
 ---
-name: qc-raw
+name: fmri-qc-raw
 description: 对 fMRI 数据做数据检查 / 质量检查 / 入库体检。输出每个 run 的 TR（volume）数、6 方向头动（run 内 + run 间）、采集是否齐全、参数是否一致、outlier/DVARS/tSNR，给出 pass/warn/fail 名单与带原因的 HTML 报告和文本表。只做 EPI-to-EPI 刚体估计，不做解剖或模板配准。当用户说「对这批数据做数据检查」「查一下数据质量」「数据能不能用」「头动大不大」「数据采集齐了没」「跑个 QC」，或需要在预处理前判断新到的数据是否合格时使用。主流程输入是 BIDS，拿到原始 DICOM 先用 bids-convert 转换。另含 qc_shim.py：查匀场框(shim box)与扫描框是否对齐、反向 PE 图是否继承了定位、跨 run 匀场结果是否一致——这一项只能读 DICOM 私有头，必须在转 BIDS 前跑，当用户问「匀场框和扫描框对齐没」「AP/PA 配不准」「topup/畸变校正有问题」「fieldmap 对不上」时也用本 skill。
 ---
 
-# qc-raw · 原始数据入库体检
+# fmri-qc-raw · 原始数据入库体检
 
 **SKILL_DIR（执行所有脚本时使用此路径）：**
 ```
-SKILL_DIR=${CLAUDE_SKILL_DIR:-$HOME/.claude/skills/qc-raw}
+SKILL_DIR=${CLAUDE_SKILL_DIR:-$HOME/.claude/skills/fmri-qc-raw}
 ```
 
 数据刚到手时回答一个问题：**这批数据能不能用，不能用的是哪几个 run、为什么。**
@@ -54,7 +54,7 @@ SKILL_DIR=${CLAUDE_SKILL_DIR:-$HOME/.claude/skills/qc-raw}
 ## 目录结构
 
 ```
-qc-raw/
+fmri-qc-raw/
   SKILL.md
   scripts/
     qc_raw.py            ← 主脚本：扫描 → 指标 → 判定 → 落盘
@@ -86,10 +86,10 @@ DICOM ──bids-convert──> bids/ ──qc_raw.py──> derivatives/qc-raw/
 - **`qc_shim.py` 反过来只吃 DICOM**，且必须在转换前跑——dcm2niix 不导出
   `sAdjData.*`，转完 BIDS 匀场框信息就没了。两条线互不依赖，可以并行。
 - bids-convert 的 `[6] 验证` / `[7a] cleanup_aborted.py` 已经查过文件数和 1-vol run；
-  qc-raw 是它的下一道门，查的是 **volume 数与多数派是否一致**（半截 run）
+  本 skill 是它的下一道门，查的是 **volume 数与多数派是否一致**（半截 run）
   以及 bids-convert 完全不看的头动与信号质量。
-- qc-raw 报出 `volume 数 X != 期望 Y` 时，回 bids-convert 的 [7a] 处理，
-  清理完再跑一次 qc-raw。
+- 报出 `volume 数 X != 期望 Y` 时，回 bids-convert 的 [7a] 处理，
+  清理完再跑一次。
 
 ## 工作流
 
@@ -106,7 +106,7 @@ DICOM ──bids-convert──> bids/ ──qc_raw.py──> derivatives/qc-raw/
 
 **为什么必须在这一步**：匀场框（Siemens 的 adjustment volume）只存在于 DICOM
 私有头 `(0029,1020)` 的 ASCCONV 文本段里。**dcm2niix 不会把它写进 BIDS sidecar**，
-转完 BIDS 这个信息就永久丢了。所以它是 qc-raw 里唯一一个吃 DICOM 的脚本，
+转完 BIDS 这个信息就永久丢了。所以它是本 skill 里唯一一个吃 DICOM 的脚本，
 和 `qc_raw.py` 那条链完全独立。
 
 ```bash

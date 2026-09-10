@@ -1,4 +1,4 @@
-# qc-raw 配置模板
+# fmri-qc-raw 配置模板
 #
 # 用法：
 #   cp qc_config.yaml <project>/code/qc_config.yaml   # 然后按项目改

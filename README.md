@@ -2,7 +2,13 @@
 
 原始 fMRI 数据的入库体检工具。数据刚从扫描仪下来时回答一个问题：**这批数据能不能用，不能用的是哪几个 run、为什么。**
 
-同时是一个 [Claude Code](https://claude.com/claude-code) skill——把整个目录放进 `~/.claude/skills/` 就能用自然语言驱动；不用 Claude Code 也可以直接当命令行脚本跑。
+同时是一个 [Claude Code](https://claude.com/claude-code) skill——克隆到 `~/.claude/skills/fmri-qc-raw` 就能用自然语言驱动；不用 Claude Code 也可以直接当命令行脚本跑。
+
+```bash
+git clone https://github.com/Aliceconan/fmri-qc-raw ~/.claude/skills/fmri-qc-raw
+```
+
+> 命名说明：skill 和仓库叫 `fmri-qc-raw`，但脚本名（`qc_raw.py`）和 BIDS 输出路径（`derivatives/qc-raw/`）保持不变，这样已有的产物目录和 `--rejudge` 不会失效。
 
 ## 它查什么
 
