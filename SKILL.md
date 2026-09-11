@@ -1,6 +1,6 @@
 ---
 name: fmri-qc-raw
-description: 对 fMRI 数据做数据检查 / 质量检查 / 入库体检。输出每个 run 的 TR（volume）数、6 方向头动（run 内 + run 间）、采集是否齐全、参数是否一致、outlier/DVARS/tSNR，给出 pass/warn/fail 名单与带原因的 HTML 报告和文本表。只做 EPI-to-EPI 刚体估计，不做解剖或模板配准。当用户说「对这批数据做数据检查」「查一下数据质量」「数据能不能用」「头动大不大」「数据采集齐了没」「跑个 QC」，或需要在预处理前判断新到的数据是否合格时使用。主流程输入是 BIDS，拿到原始 DICOM 先用 bids-convert 转换。另含 qc_shim.py：查匀场框(shim box)与扫描框是否对齐、反向 PE 图是否继承了定位、跨 run 匀场结果是否一致——这一项只能读 DICOM 私有头，必须在转 BIDS 前跑，当用户问「匀场框和扫描框对齐没」「AP/PA 配不准」「topup/畸变校正有问题」「fieldmap 对不上」时也用本 skill。
+description: 对 fMRI 数据做数据检查 / 质量检查 / 入库体检。输出每个 run 的 TR（volume）数、6 方向头动（run 内 + run 间）、采集是否齐全、参数是否一致、outlier/DVARS/tSNR，给出 pass/warn/fail 名单与带原因的 HTML 报告和文本表。只做 EPI-to-EPI 刚体估计，不做解剖或模板配准。当用户说「对这批数据做数据检查」「查一下数据质量」「数据能不能用」「头动大不大」「数据采集齐了没」「跑个 QC」，或需要在预处理前判断新到的数据是否合格时使用。主流程输入是 BIDS，拿到原始 DICOM 先用 bids-convert 转换。另含 qc_shim.py：查匀场框(shim box)与扫描框是否对齐、反向 PE 图是否继承了定位、跨 run 匀场结果是否一致、发射校准(reference amplitude)是否被手动覆盖——这一项只能读 DICOM 私有头，必须在转 BIDS 前跑，当用户问「匀场框和扫描框对齐没」「AP/PA 配不准」「topup/畸变校正有问题」「fieldmap 对不上」「reference amplitude 警告是什么」「翻转角不对」时也用本 skill。
 ---
 
 # fmri-qc-raw · 原始数据入库体检
@@ -60,7 +60,8 @@ fmri-qc-raw/
     qc_raw.py            ← 主脚本：扫描 → 指标 → 判定 → 落盘
     qc_report.py         ← HTML 报告（被主脚本调用，也可单独重跑）
     qc_summary.py        ← 终端文本表（序列汇总 + 头动汇总），主脚本跑完自动写 summary.txt
-    qc_shim.py           ← 匀场框检查。【吃 DICOM，不吃 BIDS】独立于上面三个，
+    qc_shim.py           ← 匀场框 + 扫描框 + 匀场结果 + 发射校准检查。
+                           【吃 DICOM，不吃 BIDS】独立于上面三个，
                            在转 BIDS 之前跑，见下面「[0] 匀场框检查」
   templates/
     qc_config.yaml       ← 阈值与期望值配置模板
@@ -122,7 +123,7 @@ python3 "$SKILL_DIR/scripts/qc_shim.py" --dicom /path/to/dcm --verify
 
 只依赖 pydicom + numpy，不需要 AFNI。3982 个文件约 3.5 秒（每个 series 只读第一帧）。
 
-查四层：
+查五层：
 
 | 层 | 查什么 | 判定 |
 |---|---|---|
@@ -130,6 +131,7 @@ python3 "$SKILL_DIR/scripts/qc_shim.py" --dicom /path/to/dcm --verify
 | **series 间·匀场框几何** | 匀场框几何分组，组内面内朝向是否统一 | 朝向差 > `--max-rot`(0.5°) → `warn` |
 | **series 间·扫描框几何** | 同规格 EPI 的扫描框分组——func 与其反向 PE 图必须同组 | 分出多组 → `warn`（topup 的两个输入几何不同） |
 | **series 间·匀场结果** | 实际 shim 电流 + 中心频率分组 | 同一定位下出现多套匀场结果 → `warn` |
+| **series 间·发射校准** | reference amplitude 是否被手动钉死、同规格 EPI 内是否一致 | 带 `ucManualReferenceAmplitudeValid` → `warn`，并折算实际翻转角占标称的比例 |
 
 **别拿 `sAdjData.lCoupleAdjVolTo` 当判据。** 它看着像"匀场框是否耦合到 slice group"，
 但实测 6 个 7T session **全部** `lCoupleAdjVolTo = 1`，实际行为却分成两类：2 场匀场框
@@ -139,7 +141,7 @@ python3 "$SKILL_DIR/scripts/qc_shim.py" --dicom /path/to/dcm --verify
 唯一可靠的判据是直接比几何，也就是第一层在做的事——第一层永远要看，
 不能因为 `耦合=1` 就跳过。
 
-四层都会抓到东西，实测在 7T 数据上抓到过这些：
+五层都会抓到东西，实测在 7T 数据上抓到过这些：
 
 - **匀场框冻结在协议模板值，不跟 FOV 走**（最严重，见 pitfalls §5d）：连续 4 个
   session 的匀场框中心都是同一个 `[-5.44, 2.02, 15.76]`，而扫描框每次按被试头位
@@ -149,13 +151,18 @@ python3 "$SKILL_DIR/scripts/qc_shim.py" --dicom /path/to/dcm --verify
   落另一组，差 0.87mm / 1.19°；另一场前 3 个 run 的 func 与 reverse 差 3.17mm，
   技师中途重新定位后才配上。这一层独立于匀场框分组——匀场框冻结时所有 EPI 会挤进
   同一个匀场几何组，只比匀场框看不出 func/reverse 之间的定位差异。
-
+- **发射校准被手动钉死**（第 4 层，见 pitfalls §5f）：一个手动值 220.0 V 贯穿 8 场里的 7 场，
+  但挂的位置会变——一场挂在 forward 的单个 run 上（造成**同一场内 run 之间**翻转角
+  83.2% vs 100%），另外六场挂在所有 reverse 上。所以 func 和 reverse 两边都要查。
+  判据是 `ucManualReferenceAmplitudeValid` 存不存在，
+  **不能看 `bReferenceAmplitudeValid`**（两种情况都是 1）。
 - **反向 PE 图的面内朝向没继承 func 的定位**：func 是 −4.100°（技师定位时转过），
   reverse 是整数 180.000°（模板默认值），对 180° 取模后净差 4.1°。
   中心和法向都是精确复制的，只有这一项没跟上。
-  注意 `dInPlaneRot` **与 PE 极性无关**（极性由 `PhaseEncodingDirectionPositive`
-  单独控制），所以正确继承的 reverse 这一项应当与 func **完全相同**，
-  不是差 180°——详见 pitfalls §5c。
+  注意 `dInPlaneRot` **与 PE 极性无关**（极性另由 `PhaseEncodingDirectionPositive`
+  区分），所以正确继承的 reverse 这一项应当与 func **完全相同**，不是差 180°——详见 pitfalls §5c。
+  那个极性标志可以用来确认 func / reverse 确实反向（取值必须相反），
+  但**不能拿它推绝对解剖方向**，会算反，见 pitfalls §5e。
 - **AP 与 PA 用了两套匀场结果**：shim 电流差最多 189 DAC，f0 差 72 Hz。
   topup/SDC 的前提是 AP/PA 经历同一个 B0 场、只有 PE 极性相反，这个前提被破坏。
 
@@ -167,7 +174,7 @@ python3 "$SKILL_DIR/scripts/qc_shim.py" --dicom /path/to/dcm --verify
 **不是实际位移**——扫描仪重设了 f0，常数项大部分会被 topup 吸收进场估计；
 真正建模不了的是一/二阶 shim 的空间不均匀差异。别拿这个数去汇报。
 
-产物 `qc_shim.tsv`（一行一个 series，22 列）+ `qc_shim.json`（含完整框几何与 shim 电流）。
+产物 `qc_shim.tsv`（一行一个 series，24 列）+ `qc_shim.json`（含完整框几何与 shim 电流）。
 有 `fail` 退出码为 1。
 
 **厂商限制**：只有 Siemens 经典 DICOM/`.IMA` 能拿到完整几何。

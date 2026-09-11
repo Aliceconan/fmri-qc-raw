@@ -6,10 +6,15 @@ qc_shim.py — 匀场框 / 扫描框几何与匀场结果一致性检查（**吃
 写进 BIDS sidecar。所以这一项必须在**转 BIDS 之前**、拿到原始 DICOM 时查，
 查完了这批 DICOM 可以照常走 bids-convert。
 
-三层检查：
-  [1] series 内   匀场框 vs 扫描框是否重合（中心偏移 / 法向夹角 / FOV 覆盖）
-  [2] series 间   匀场框几何分组——同一次定位的 run 应当落在同一组
-  [3] series 间   实际匀场结果分组（shim 电流 + 中心频率）——框一样 ≠ 匀场结果一样
+检查层：
+  [1]  series 内   匀场框 vs 扫描框是否重合（中心偏移 / 法向夹角 / FOV 覆盖）
+  [2]  series 间   匀场框几何分组——同一次定位的 run 应当落在同一组
+  [2b] series 间   扫描框分组——func 与其反向 PE 图必须落在同一组
+  [3]  series 间   实际匀场结果分组（shim 电流 + 中心频率）——框一样 ≠ 匀场结果一样
+  [4]  series 间   发射校准——reference amplitude 是否被手动钉死、组内是否一致
+
+不查相位编码方向。CSA 的 PhaseEncodingDirectionPositive 不能直接折算成解剖方向
+（见 references/pitfalls.md §5e），要查方向请转 BIDS 后看 sidecar。
 
 用法：
     python3 qc_shim.py --dicom <DICOM目录>
@@ -53,6 +58,13 @@ except ImportError:
 CSA_SERIES_TAG = (0x0029, 0x1020)
 ACQ_MATRIX_TAG = (0x0018, 0x1310)
 BWPPPE_TAG = (0x0019, 0x1028)          # BandwidthPerPixelPhaseEncode
+
+# 发射校准。ucManualReferenceAmplitudeValid 是「是否手动覆盖」的唯一可靠判据；
+# bReferenceAmplitudeValid 两边恒为 1，只说明值可用、不区分来源，不能拿来判断。
+KREF = "sTXSPEC.asNucleusInfo[0].flReferenceAmplitude"
+KMANREF = "sTXSPEC.asNucleusInfo[0].ucManualReferenceAmplitudeValid"
+KRFAMP = "sTXSPEC.aRFPULSE[0].flAmplitude"
+KFLIP = "adFlipAngleDegree[0]"
 
 
 # ---------------------------------------------------------------- 解析
@@ -190,6 +202,8 @@ def collect(root: Path):
                    f0=int(d.get("sTXSPEC.asNucleusInfo[0].lFrequency", 0)),
                    shim=[int(d.get(f"sGRADSPEC.alShimCurrent[{i}]", 0)) for i in range(9)],
                    bwpppe=float(ds[BWPPPE_TAG].value) if BWPPPE_TAG in ds else None,
+                   ref_ampl=d.get(KREF), man_ref=d.get(KMANREF),
+                   rf_ampl=d.get(KRFAMP), flip_nom=d.get(KFLIP),
                    ascconv=d, ds=ds)
         if rec["has_shim"]:
             sh = shim_box(d)
@@ -293,6 +307,37 @@ def judge(rows, max_offset, max_angle, max_rot):
                     f"同一定位下存在 {len(groups)} 套匀场结果（本 series 属第 "
                     f"{r['shim_group']} 套）——反向 PE 配对不在同一 B0 场下")
 
+    # [4] 发射校准：整场的 reference amplitude 应当来自同一次自动校准。
+    # 任何 series 带 ucManualReferenceAmplitudeValid 就是被手动钉死了——
+    # 这个覆盖会在 func 和 reverse 之间「搬家」，所以两边都要查，别只查 reverse。
+    manual = [r for r in have if r.get("man_ref") is not None]
+    for r in manual:
+        if r["status"] == "pass":
+            r["status"] = "warn"
+        r["reason"].append(
+            f"发射校准被手动覆盖（ucManualReferenceAmplitudeValid=1，"
+            f"refAmpl 钉死在 {r.get('ref_ampl')} V）")
+
+    # 同规格 EPI 内 refAmpl 不一致 → 折算成实际翻转角占标称的比例
+    for members in spec.values():
+        amps = {r["ref_ampl"] for r in members if r.get("ref_ampl")}
+        if len(amps) <= 1:
+            continue
+        auto = [r for r in members if r.get("man_ref") is None and r.get("ref_ampl")]
+        base = max((r["ref_ampl"] for r in auto), default=max(amps))
+        for r in members:
+            ra = r.get("ref_ampl")
+            if not ra or abs(ra - base) < 1e-6:
+                continue
+            pct = ra / base * 100
+            nom = r.get("flip_nom")
+            extra = f"，标称 {nom:.0f}° → 实际约 {nom * ra / base:.1f}°" if nom else ""
+            if r["status"] == "pass":
+                r["status"] = "warn"
+            r["reason"].append(
+                f"发射幅度 {ra:.1f} V 与同规格 EPI 的自动校准值 {base:.1f} V 不同"
+                f"（{pct:.1f}%{extra}）")
+
     return geo, shimgrp, spec, any(r["status"] == "fail" for r in rows)
 
 
@@ -358,6 +403,42 @@ def print_groups(geo, shimgrp):
     _print_shim_list(shimgrp)
 
 
+def print_transmit(rows):
+    """发射校准一览：整场应当只有一个自动校准值。"""
+    have = [r for r in rows if r.get("ref_ampl")]
+    if not have:
+        return
+    print("\n=== 发射校准（reference amplitude）===")
+    groups = {}
+    for r in have:
+        groups.setdefault((r["ref_ampl"], r.get("man_ref")), []).append(r)
+    auto = [k[0] for k in groups if k[1] is None]
+    base = max(auto) if auto else None
+    for (amp, man), ms in sorted(groups.items(), key=lambda x: -len(x[1])):
+        tag = "手动覆盖" if man is not None else "自动校准"
+        line = f"  {amp:>16.6f} V  [{tag}]  ← {len(ms)} 个 series"
+        if base and man is not None:
+            nom = next((m.get("flip_nom") for m in ms if m.get("flip_nom")), None)
+            line += f"  = 自动值的 {amp/base*100:.1f}%"
+            if nom:
+                line += f"（标称 {nom:.0f}° → 约 {nom*amp/base:.1f}°）"
+        print(line)
+        names = ", ".join(f"{m['series']}:{m['desc'][:22]}" for m in ms[:6])
+        more = f" …共 {len(ms)} 个" if len(ms) > 6 else ""
+        print(f"      {names}{more}")
+    n_manual = sum(1 for k in groups if k[1] is not None)
+    if n_manual == 0:
+        if len(groups) == 1:
+            print("  ✓ 全场同一个自动校准值，无手动覆盖")
+        else:
+            print(f"  ✓ 无手动覆盖。{len(groups)} 个值全部来自自动校准——"
+                  "开场与各阶段各 adjust 一次会产生多个值，属正常")
+    else:
+        print(f"  ⚠ 有 {n_manual} 组被手动钉死。关掉协议里的 "
+              "ucManualReferenceAmplitudeValid 即可恢复跟随自动校准；"
+              "注意这个覆盖会在 func 和 reverse 之间搬家，两边都要查")
+
+
 def print_scan_groups(spec):
     """同规格 EPI 的扫描框分组。func 和它的反向 PE 图必须落在同一组，
     否则 topup/SDC 拿到的是两个几何不同的输入。"""
@@ -398,7 +479,8 @@ def _print_shim_list(shimgrp):
 def write_out(rows, outdir: Path):
     outdir.mkdir(parents=True, exist_ok=True)
     cols = ["series", "desc", "nfiles", "n_slices", "status", "coupled", "shim_mode",
-            "adj_prot_id", "shim_group", "f0", "offset_mm", "along_mm", "inplane_mm",
+            "adj_prot_id", "shim_group", "f0", "ref_ampl", "manual_ref_ampl",
+            "offset_mm", "along_mm", "inplane_mm",
             "normal_deg", "rot_vs_group_deg", "shimbox_ro", "shimbox_pe", "shimbox_th",
             "scanbox_ro", "scanbox_pe", "scanbox_th", "reason"]
     tsv = outdir / "qc_shim.tsv"
@@ -407,12 +489,14 @@ def write_out(rows, outdir: Path):
         for r in rows:
             if not r.get("has_shim"):
                 fh.write(f"{r['series']}\t{r['desc']}\t{r['nfiles']}\tn/a\tskip"
-                         + "\tn/a" * 16 + f"\t{r.get('note','')}\n")
+                         + "\tn/a" * 18 + f"\t{r.get('note','')}\n")
                 continue
             c, sh, sc = r["cmp"], r["shimbox"], r["scan"]
             fh.write("\t".join(str(x) for x in [
                 r["series"], r["desc"], r["nfiles"], r["n_slices"], r["status"],
                 r["coupled"], r["shim_mode"], r["adj_prot_id"], r["shim_group"], r["f0"],
+                r.get("ref_ampl") if r.get("ref_ampl") is not None else "n/a",
+                1 if r.get("man_ref") is not None else 0,
                 f"{c['dist']:.3f}", f"{c['along']:.3f}", f"{c['inplane']:.3f}",
                 f"{c['angle']:.4f}", f"{r.get('rot_vs_group',0):.4f}",
                 f"{sh['ro']:.1f}", f"{sh['pe']:.1f}", f"{sh['thick']:.1f}",
@@ -428,6 +512,9 @@ def write_out(rows, outdir: Path):
             e.update(coupled=r["coupled"], shim_mode=r["shim_mode"],
                      adj_prot_id=r["adj_prot_id"], shim_group=r["shim_group"],
                      f0=r["f0"], shim_current=r["shim"],
+                     ref_amplitude=r.get("ref_ampl"),
+                     manual_ref_amplitude=r.get("man_ref") is not None,
+                     rf_pulse_amplitude=r.get("rf_ampl"),
                      shimbox={k: (v.tolist() if isinstance(v, np.ndarray) else v)
                               for k, v in r["shimbox"].items()},
                      scanbox={k: (v.tolist() if isinstance(v, np.ndarray) else v)
@@ -533,6 +620,7 @@ def main():
     print_groups(geo, shimgrp)
     if spec:
         print_scan_groups(spec)
+    print_transmit(rows)
 
     n_f = sum(1 for r in rows if r["status"] == "fail")
     n_w = sum(1 for r in rows if r["status"] == "warn")

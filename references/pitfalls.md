@@ -193,6 +193,69 @@ fMRIPrep / sdcflows 会先做刚体配准，比裸 topup 稳，但代价是多�
 **判据只能是直接比几何**（`qc_shim.py` 第一层），不能看 `lCoupleAdjVolTo`。
 每场扫完立刻跑一遍，当场发现当场重定，比事后追悔便宜得多。
 
+### 5e. CSA 的 `PhaseEncodingDirectionPositive` 不能直接折算成解剖方向
+
+CSA image header 里有个 `PhaseEncodingDirectionPositive`，看着像是「PE 沿正方向与否」，
+很容易写成「取 `ImageOrientationPatient` 的列向量，按这个标志定符号，再看 y 分量定 A/P」。
+**这样算出来是反的。**
+
+**实测**：同一批数据上这样算得 func 朝 P、reverse 朝 A；而 dcm2niix 转出的 BIDS
+sidecar 给的是 func `j`（P→A，朝 A）、reverse `j-`（A→P，朝 P）——正好相反。
+西门子的行/列约定加上 mosaic 的存储翻转，中间有不止一层符号，光靠这一个标志推不出来。
+
+**只能用 dcm2niix 的 sidecar**。SBRef 只有一帧，转起来很快：
+
+```bash
+mkdir -p /tmp/pe/in /tmp/pe/out
+cp <session>/*.<series>.0001.*.IMA /tmp/pe/in/
+~/abin/dcm2niix_afni -b y -z n -o /tmp/pe/out /tmp/pe/in
+```
+
+再把 sidecar 的 `PhaseEncodingDirection` 和 NIfTI affine 合起来折算：
+
+```python
+axis = {'i':0,'j':1,'k':2}[ped[0]]
+v = nib.load(nii).affine[:3, axis] * (-1 if ped.endswith('-') else 1)
+k = int(np.argmax(np.abs(v)))          # affine 是 RAS+
+to = [('L','R'),('P','A'),('I','S')][k][1 if v[k] > 0 else 0]
+```
+
+**这个标志本身仍然有用**——func 与 reverse 的取值必须相反（1 vs 0），
+用来确认「两者确实是反向配对」是可靠的；只是不能拿来定绝对方向。
+
+`qc_shim.py` 因此不报 PE 方向，只在 [2b] 层查 func / reverse 的扫描框是否同组。
+
+### 5f. 发射校准会被手动钉死，而且会在 func 和 reverse 之间搬家
+
+协议里可以手动指定 reference amplitude（发射电压），跳过每个被试的自动校准。
+开着时控制台每次都弹 *"The reference amplitude has been manipulated"*。
+
+**判据是 `sTXSPEC.asNucleusInfo[0].ucManualReferenceAmplitudeValid` 存不存在**
+（ASCCONV 省略默认值，所以「字段不在」＝关闭）。
+**不要看 `bReferenceAmplitudeValid`**，它在手动和自动两种情况下都是 1，
+只表示「值可用」，不区分来源——和 §5d 的 `lCoupleAdjVolTo` 一个毛病。
+
+**实测**（同一台 7T、8 场）：有一个手动值 220.0 V 贯穿其中 7 场，但**挂的位置会变**：
+
+| 场次 | 手动值挂在哪 | 后果 |
+|---|---|---|
+| 第 2 场 | forward 的 **run1 一个 run** | 该 run 翻转角 83.2%，同场其他 run 100%——**同一场内 run 之间不一致** |
+| 第 3–8 场 | **所有 reverse** | reverse 翻转角 84.8%–92.5% 且随被试浮动，forward 恒为标称值 |
+
+所以**两边都要查**，只查 reverse 会漏掉第一种。
+
+**影响有多大**：翻转角正比于发射幅度，但如果标称角本来就在 Ernst 角附近，
+信号对它是二阶不敏感的。实测标称 68°、TR 2000 ms、7T 灰质 T1≈1950 ms
+（Ernst 角 69.0°），发射幅度掉 11.6% → 实际 60.1°，灰质信号只掉 1.4%、
+白质 4.0%、CSF 反升 4.3%。
+
+对 topup 影响很小：`b02b0.cnf` 默认带 `--scale=1`（各图单独归一到共同均值），
+全局强度差异被直接吸收；剩下的几个百分点对比度变化，相对 EPI 本身几个 voxel
+的畸变是小量。**真正的代价是被试间浮动**（forward 恒定、reverse 随被试变）
+**和警告污染**——每场每个 reverse 都弹窗，技师会养成不看就点 Continue 的习惯。
+
+修法是关掉那个开关，`refAmpl`、RF 脉冲幅度、整套 SAR 保护标定会一起回来。
+
 ---
 
 ## B. 环境与运行
@@ -223,6 +286,23 @@ export PATH=/tmp/bin:$PATH
 ### 9. `-maxdisp1D foo.1D` 的 delta 文件叫 `foo.1D_delt`
 
 不是 `_delta`。少一个 a。
+
+### 9b. 西门子 `.IMA` 文件名里的时间戳是导出时刻，不是采集时刻
+
+文件名形如 `<名>.MR.<描述>.<series>.<instance>.2026.09.10.12.34.07.<…>.IMA`，
+中间那串时间**不是**这一场什么时候扫的。实测差了两个多小时：
+
+```
+文件名内嵌       12:34
+StudyTime       09:51     ← 检查开始
+AcquisitionTime 09:58     ← 第一个 series 采集
+```
+
+拿文件名当采集时间会把整条时间线排错——尤其在「哪一场之后协议被改了」
+这类推断上，顺序一错结论就反了。
+
+**用 DICOM 字段**：`StudyTime`（检查开始）或 `AcquisitionTime`（该 series 采集）。
+前者适合标一场数据，后者适合排 series 内部的先后。
 
 ### 10. `3dvolreg` 没有 `-quiet`
 
