@@ -114,8 +114,16 @@ topup 的标准流程是 `fslmerge -t AP_PA AP PA`，**但 fslmerge 只是按体
 `3dTcat` / `3dbucket` 同理。
 
 **实测案例**（7T，见 `qc_shim.py`）：PA 的面内朝向比 AP 差 4.100°——
-中心和法向都是精确复制的，只有 `dInPlaneRot` 没继承（AP 是技师定位的
-−4.100°，PA 是模板默认的整数 180.000°，正确继承应为 175.900°）。
+中心和法向都是精确复制的，只有 `dInPlaneRot` 没继承：AP 是技师定位时转出的
+−4.100°，PA 是模板默认的整数 180.000°。
+
+> **`dInPlaneRot` 与 PE 极性无关。** 相位编码反向由独立的极性标志
+> （CSA image header 的 `PhaseEncodingDirectionPositive`）控制，不是靠把
+> `dInPlaneRot` 加 180° 实现的。已在同机型另外两场数据上确认：func 与 reverse
+> 的 `dInPlaneRot` 完全相同（都是 −0.300°），而 PE 极性确实相反（1 vs 0）。
+> 所以**正确继承的 reverse，`dInPlaneRot` 应当和 func 一模一样**——本例中
+> 应为 −4.100°。度量两者差异时对 180° 取模（矩形 FOV 转 180° 是同一个框）。
+
 按体素强行对应的错位量：
 
 | 距 FOV 中心 | 错位 | 体素数（1.2mm） |
