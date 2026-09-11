@@ -86,6 +86,9 @@ DICOM ──bids-convert──> bids/ ──qc_raw.py──> derivatives/qc-raw/
 - **`qc_raw.py` 必须先转 BIDS**，它吃 BIDS 布局，不吃平铺 DICOM。
 - **`qc_shim.py` 反过来只吃 DICOM**，且必须在转换前跑——dcm2niix 不导出
   `sAdjData.*`，转完 BIDS 匀场框信息就没了。两条线互不依赖，可以并行。
+- **撞名检测只在 DICOM 阶段有效**：`qc_shim.py` 第 [5] 层自动报同名序列，
+  `qc_raw.py` 不查这个——转换后 BIDS 里若两个同名 series 已被合并或覆盖，
+  就只剩一个文件，无从知道原本有两个。详见 pitfalls §17。
 - bids-convert 的 `[6] 验证` / `[7a] cleanup_aborted.py` 已经查过文件数和 1-vol run；
   本 skill 是它的下一道门，查的是 **volume 数与多数派是否一致**（半截 run）
   以及 bids-convert 完全不看的头动与信号质量。
@@ -123,7 +126,7 @@ python3 "$SKILL_DIR/scripts/qc_shim.py" --dicom /path/to/dcm --verify
 
 只依赖 pydicom + numpy，不需要 AFNI。3982 个文件约 3.5 秒（每个 series 只读第一帧）。
 
-查五层：
+查六层：
 
 | 层 | 查什么 | 判定 |
 |---|---|---|
@@ -132,6 +135,7 @@ python3 "$SKILL_DIR/scripts/qc_shim.py" --dicom /path/to/dcm --verify
 | **series 间·扫描框几何** | 同规格 EPI 的扫描框分组——func 与其反向 PE 图必须同组 | 分出多组 → `warn`（topup 的两个输入几何不同） |
 | **series 间·匀场结果** | 实际 shim 电流 + 中心频率分组 | 同一定位下出现多套匀场结果 → `warn` |
 | **series 间·发射校准** | reference amplitude 是否被手动钉死、同规格 EPI 内是否一致 | 带 `ucManualReferenceAmplitudeValid` → `warn`，并折算实际翻转角占标称的比例 |
+| **series 名撞名** | 按 `SeriesDescription` 归组，同名即报 | 非定位像同名 → `warn`，并按帧数差异提示是中断+重扫还是两次完整采集 |
 
 **别拿 `sAdjData.lCoupleAdjVolTo` 当判据。** 它看着像"匀场框是否耦合到 slice group"，
 但实测 6 个 7T session **全部** `lCoupleAdjVolTo = 1`，实际行为却分成两类：2 场匀场框
@@ -141,7 +145,7 @@ python3 "$SKILL_DIR/scripts/qc_shim.py" --dicom /path/to/dcm --verify
 唯一可靠的判据是直接比几何，也就是第一层在做的事——第一层永远要看，
 不能因为 `耦合=1` 就跳过。
 
-五层都会抓到东西，实测在 7T 数据上抓到过这些：
+六层都会抓到东西，实测在 7T 数据上抓到过这些：
 
 - **匀场框冻结在协议模板值，不跟 FOV 走**（最严重，见 pitfalls §5d）：连续 4 个
   session 的匀场框中心都是同一个 `[-5.44, 2.02, 15.76]`，而扫描框每次按被试头位

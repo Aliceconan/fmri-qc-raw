@@ -141,6 +141,12 @@ def compare(sh, sc):
                 d_th=sh["thick"] - sc["thick"])
 
 
+def is_localizer(desc):
+    """定位像 / 其派生 MPR。这类重名通常无害——一般不参与 BIDS 转换。"""
+    d = desc.lower()
+    return any(x in d for x in ("scout", "localizer", "_mpr", "survey"))
+
+
 def rot_delta(a, b):
     """面内朝向差。对 180° 取模——PE 极性反转会把 rot 加 180°，那不是真差异。"""
     d = abs(a - b) % 180.0
@@ -338,7 +344,27 @@ def judge(rows, max_offset, max_angle, max_rot):
                 f"发射幅度 {ra:.1f} V 与同规格 EPI 的自动校准值 {base:.1f} V 不同"
                 f"（{pct:.1f}%{extra}）")
 
-    return geo, shimgrp, spec, any(r["status"] == "fail" for r in rows)
+    # [5] 同名 series：dcm2bids 按序列名匹配，同名会在转换时撞名。
+    # 定位像重复扫很常见且通常不转，单独列出、不升级状态。
+    dup = {}
+    for r in rows:
+        dup.setdefault(r["desc"], []).append(r)
+    dup = {k: v for k, v in dup.items() if len(v) > 1}
+    for name, ms in dup.items():
+        benign = is_localizer(name)
+        for r in ms:
+            r["dup_group"] = name
+            r["dup_benign"] = benign
+        if benign:
+            continue
+        sers = ", ".join(f"{m['series']}({m['nfiles']}帧)" for m in ms)
+        for r in ms:
+            if r["status"] == "pass":
+                r["status"] = "warn"
+            r["reason"].append(
+                f"序列名与另外 {len(ms)-1} 个 series 重名：{sers}——转 BIDS 会撞名")
+
+    return geo, shimgrp, spec, dup, any(r["status"] == "fail" for r in rows)
 
 
 # ---------------------------------------------------------------- 输出
@@ -401,6 +427,37 @@ def print_groups(geo, shimgrp):
 
     print("\n=== 实际匀场结果一览（shim 电流 + 中心频率）===")
     _print_shim_list(shimgrp)
+
+
+def print_duplicates(dup):
+    """同名 series 一览。"""
+    if not dup:
+        return
+    real = {k: v for k, v in dup.items() if not is_localizer(k)}
+    loc = {k: v for k, v in dup.items() if is_localizer(k)}
+    print("\n=== 同名 series（dcm2bids 按序列名匹配，同名会撞名）===")
+    if real:
+        for name, ms in real.items():
+            print(f"  ⚠ {name}")
+            for m in ms:
+                print(f"      ser{m['series']:>3}  {m['nfiles']:>5} 帧")
+            # SBRef 同名多半只是主序列同名的附带产物，不单独给处置建议
+            base = re.sub(r"_SBRef$", "", name, flags=re.I)
+            if base != name and base in real:
+                print(f"      → 伴随 {base} 同名，按主序列一起处理即可")
+                continue
+            frames = [m["nfiles"] for m in ms]
+            if max(frames) > 0 and min(frames) / max(frames) < 0.8:
+                print("      → 帧数相差较大，短的那个多半是中断的；"
+                      "转换时用 acq-aborted 之类标记区分，别往后顺延 run 号")
+            else:
+                print("      → 帧数相近，看着都是完整采集；"
+                      "得先人工决定留哪一个，或手工加 acq- 区分")
+    else:
+        print("  ✓ 无实质同名（除定位像外）")
+    if loc:
+        names = ", ".join(f"{k}×{len(v)}" for k, v in loc.items())
+        print(f"  定位像重名 {len(loc)} 组（通常无害，不参与转换）：{names}")
 
 
 def print_transmit(rows):
@@ -614,13 +671,14 @@ def main():
         do_verify(rows)
         return 0
 
-    geo, shimgrp, spec, has_fail = judge(rows, args.max_offset, args.max_angle,
-                                         args.max_rot)
+    geo, shimgrp, spec, dup, has_fail = judge(rows, args.max_offset, args.max_angle,
+                                              args.max_rot)
     print_table(rows)
     print_groups(geo, shimgrp)
     if spec:
         print_scan_groups(spec)
     print_transmit(rows)
+    print_duplicates(dup)
 
     n_f = sum(1 for r in rows if r["status"] == "fail")
     n_w = sum(1 for r in rows if r["status"] == "warn")
