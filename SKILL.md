@@ -283,6 +283,13 @@ python3 "$SKILL_DIR/scripts/qc_summary.py" --bids "$PROJECT_DIR/bids"
 Siemens 的 AP/PA 命名经常和实际方向相反，**以 Phase_Dir 为准**。
 表里同时给出原始 `PE(BIDS)` 字段，方便自己核。
 
+`summary.txt` 里还有一张 **func ↔ reverse-PE 配对检查表**。判定看
+`头位差(净)` 那列（只含不受畸变污染的分量）；`PE轴(含畸变)` 那列**不参与判定**，
+而且**不能当场漂移读**——func 与 reverse 的 PE 方向相反，同一个 B0 不均匀会把
+两张图往相反方向推，所以它约等于 **2× 单向畸变量**。想看 run 内场漂移得去比
+**相邻两个 reverse-PE**（PE 方向相同）。详见 `references/pitfalls.md` §5g，
+那里有实测数字和命令。
+
 ### [5] 判读
 
 报告只有三种状态，**fail 不等于排除**——它是「需要人看」的名单：
